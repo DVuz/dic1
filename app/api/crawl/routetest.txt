@@ -1,0 +1,343 @@
+import { NextRequest, NextResponse } from 'next/server';
+import * as cheerio from 'cheerio';
+
+interface CambridgeWord {
+  word: string;
+  meanings: Array<{
+    audio: {
+      us: string;
+      uk: string;
+    };
+    ipa: {
+      us: string;
+      uk: string;
+    };
+    partOfSpeech: string;
+    definition: string;
+    cefr_level: string;
+    examples: string[];
+  }>;
+  translation: string;
+}
+
+export async function crawlCambridgeWord(word: string): Promise<CambridgeWord | null> {
+  try {
+    const url = `https://dictionary.cambridge.org/dictionary/english/${encodeURIComponent(
+      word.trim()
+    )}`;
+
+    console.log(`🔍 Crawling Cambridge: ${url}`);
+
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache',
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error: ${response.status}`);
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    // Check if word exists
+    const hasContent =
+      $('.pr.dictionary, .entry-body, .di-title, .entry, .pr.entry-body__el').length > 0;
+    if (!hasContent) {
+      console.log(`❌ Word "${word}" not found in Cambridge`);
+      return null;
+    }
+
+    const meanings: Array<{
+      audio: { us: string; uk: string };
+      ipa: { us: string; uk: string };
+      partOfSpeech: string;
+      definition: string;
+      cefr_level: string;
+      examples: string[];
+    }> = [];
+
+    // Group meanings by part of speech với pronunciation riêng
+    const partOfSpeechGroups = new Map<
+      string,
+      {
+        ipa: { us: string; uk: string };
+        audio: { us: string; uk: string };
+        definitions: Array<{
+          definition: string;
+          cefr_level: string;
+          examples: string[];
+        }>;
+      }
+    >();
+
+    // Process each entry (mỗi entry có thể có part of speech và pronunciation khác nhau)
+    $('.pr.entry-body__el, .entry, .pr.dictionary').each(
+      (entryIndex: number, entry: cheerio.Element) => {
+        const $entry = $(entry);
+
+        // Extract pronunciation cho entry này
+        let ukIpa = '';
+        let usIpa = '';
+        let ukAudio = '';
+        let usAudio = '';
+
+        // IPA selectors specific to this entry
+        const ukIpaEl = $entry.find('.uk .pron .ipa, .uk.dpron .ipa').first();
+        const usIpaEl = $entry.find('.us .pron .ipa, .us.dpron .ipa').first();
+
+        ukIpa = ukIpaEl.text().trim();
+        usIpa = usIpaEl.text().trim();
+
+        // Fallback to any IPA in this entry
+        if (!ukIpa && !usIpa) {
+          const anyIpa = $entry.find('.ipa').first().text().trim();
+          ukIpa = anyIpa;
+          usIpa = anyIpa;
+        }
+
+        // Audio selectors specific to this entry
+        const ukAudioEl = $entry
+          .find('.uk .daud audio source[type="audio/mpeg"], .uk.dpron audio source')
+          .first();
+        const usAudioEl = $entry
+          .find('.us .daud audio source[type="audio/mpeg"], .us.dpron audio source')
+          .first();
+
+        const ukAudioSrc = ukAudioEl.attr('src');
+        const usAudioSrc = usAudioEl.attr('src');
+
+        if (ukAudioSrc) {
+          ukAudio = ukAudioSrc.startsWith('http')
+            ? ukAudioSrc
+            : `https://dictionary.cambridge.org${ukAudioSrc}`;
+        }
+        if (usAudioSrc) {
+          usAudio = usAudioSrc.startsWith('http')
+            ? usAudioSrc
+            : `https://dictionary.cambridge.org${usAudioSrc}`;
+        }
+
+        // Get part of speech cho entry này
+        const partOfSpeech = $entry.find('.pos, .dpos, .posgram .pos').first().text().trim() || '';
+
+        // Get CEFR level cho entry này
+        const cefrLevel =
+          $entry
+            .find('.epp-xref, .def-info .epp-xref, .ddef-info .epp-xref')
+            .first()
+            .text()
+            .trim() || '';
+
+        // Process definitions trong entry này
+        const defSelectors = [
+          '.def-block',
+          '.ddef_block',
+          '.sense-body .def-block',
+          '.dsense .def-block',
+        ];
+
+        for (const defSelector of defSelectors) {
+          $entry.find(defSelector).each((defIndex: number, defBlock: cheerio.Element) => {
+            const $defBlock = $(defBlock);
+            const definition = $defBlock.find('.def, .ddef_d, .def.ddef_d').text().trim();
+
+            if (definition && definition.length > 10) {
+              // Get examples for this definition
+              const examples: string[] = [];
+              const exampleSelectors = ['.examp .eg', '.dexamp .deg', '.eg', '.deg'];
+
+              for (const exSelector of exampleSelectors) {
+                $defBlock.find(exSelector).each((exIndex: number, example: cheerio.Element) => {
+                  const exampleText = $(example).text().trim();
+                  if (exampleText && !examples.includes(exampleText) && examples.length < 3) {
+                    examples.push(exampleText);
+                  }
+                });
+              }
+
+              // Group by part of speech
+              if (!partOfSpeechGroups.has(partOfSpeech)) {
+                partOfSpeechGroups.set(partOfSpeech, {
+                  ipa: { us: usIpa, uk: ukIpa },
+                  audio: { us: usAudio, uk: ukAudio },
+                  definitions: [],
+                });
+              }
+
+              partOfSpeechGroups.get(partOfSpeech)!.definitions.push({
+                definition,
+                cefr_level: cefrLevel,
+                examples,
+              });
+            }
+          });
+        }
+      }
+    );
+
+    // Convert grouped data to final format
+    for (const [pos, group] of partOfSpeechGroups) {
+      for (const def of group.definitions) {
+        meanings.push({
+          audio: group.audio,
+          ipa: group.ipa,
+          partOfSpeech: pos,
+          definition: def.definition,
+          cefr_level: def.cefr_level,
+          examples: def.examples,
+        });
+      }
+    }
+
+    // Fallback nếu không tìm thấy meanings
+    if (meanings.length === 0) {
+      // Default pronunciation fallback
+      const fallbackUkIpa = $('.uk .pron .ipa, .ipa').first().text().trim();
+      const fallbackUsIpa = $('.us .pron .ipa, .ipa').first().text().trim() || fallbackUkIpa;
+
+      const fallbackUkAudio =
+        $('.uk .daud audio source[type="audio/mpeg"]').first().attr('src') || '';
+      const fallbackUsAudio =
+        $('.us .daud audio source[type="audio/mpeg"]').first().attr('src') || '';
+
+      $('.def, .ddef_d').each((index: number, defElement: cheerio.Element) => {
+        const definition = $(defElement).text().trim();
+        if (definition && definition.length > 10) {
+          const $parent = $(defElement).closest(
+            '.entry, .pr.entry-body__el, .def-block, .ddef_block'
+          );
+          const partOfSpeech = $parent.find('.pos, .dpos').first().text().trim() || '';
+          const cefrLevel = $parent.find('.epp-xref').first().text().trim() || '';
+
+          const examples: string[] = [];
+          $parent.find('.eg, .deg').each((i: number, ex: cheerio.Element) => {
+            const exText = $(ex).text().trim();
+            if (exText && examples.length < 2) {
+              examples.push(exText);
+            }
+          });
+
+          meanings.push({
+            audio: {
+              us: fallbackUsAudio.startsWith('http')
+                ? fallbackUsAudio
+                : `https://dictionary.cambridge.org${fallbackUsAudio}`,
+              uk: fallbackUkAudio.startsWith('http')
+                ? fallbackUkAudio
+                : `https://dictionary.cambridge.org${fallbackUkAudio}`,
+            },
+            ipa: {
+              us: fallbackUsIpa,
+              uk: fallbackUkIpa,
+            },
+            partOfSpeech,
+            definition,
+            cefr_level: cefrLevel,
+            examples,
+          });
+        }
+      });
+    }
+
+    // Quick translation
+    const translation = await translateWord(word);
+
+    const result: CambridgeWord = {
+      word,
+      meanings,
+      translation,
+    };
+
+    console.log(
+      `✅ Successfully crawled "${word}" - Found ${meanings.length} meanings with ${partOfSpeechGroups.size} different pronunciations`
+    );
+    return result;
+  } catch (error) {
+    console.error(`❌ Error crawling "${word}":`, error);
+    return null;
+  }
+}
+
+// Simple Google Translate for word only
+async function translateWord(word: string): Promise<string> {
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=vi&dt=t&q=${encodeURIComponent(
+      word
+    )}`;
+
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(5000),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+
+    if (!response.ok) {
+      return word;
+    }
+
+    const data = await response.json();
+
+    if (data[0] && data[0][0] && data[0][0][0]) {
+      return data[0][0][0];
+    }
+
+    return word;
+  } catch (error) {
+    console.error('Translation failed:', error);
+    return word;
+  }
+}
+
+// API Route handlers
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const word = searchParams.get('word');
+
+    if (!word || word.trim().length === 0) {
+      return NextResponse.json({ error: 'Word parameter is required' }, { status: 400 });
+    }
+
+    const result = await crawlCambridgeWord(word.trim());
+
+    if (!result) {
+      return NextResponse.json({ error: `Word "${word}" not found` }, { status: 404 });
+    }
+
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error('API Error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const { word } = await request.json();
+
+    if (!word || word.trim().length === 0) {
+      return NextResponse.json({ error: 'Word is required' }, { status: 400 });
+    }
+
+    const result = await crawlCambridgeWord(word.trim());
+
+    if (!result) {
+      return NextResponse.json({ error: `Word "${word}" not found` }, { status: 404 });
+    }
+
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error('API Error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

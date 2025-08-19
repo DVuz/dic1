@@ -1,0 +1,8 @@
+words
+uk_ipa
+us_ipa
+definition
+vn_definition
+example
+parts_of_speech
+cefr_level

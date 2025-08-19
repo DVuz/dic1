@@ -1,0 +1,106 @@
+-- auto-generated definition
+create table review_history
+(
+    id                   bigint auto_increment
+        primary key,
+    user_id              int                                               not null,
+    word_id              int                                               not null,
+    reviewed_at          timestamp default CURRENT_TIMESTAMP               null,
+    question_type        enum ('meaning', 'word', 'listening', 'spelling') not null,
+    is_correct           tinyint(1)                                        not null,
+    response_time_ms     int                                               null,
+    ease_factor_before   decimal(4, 2)                                     null,
+    interval_before_days int                                               null,
+    ease_factor_after    decimal(4, 2)                                     null,
+    interval_after_days  int                                               null,
+    constraint review_history_ibfk_1
+        foreign key (user_id) references users (id)
+            on delete cascade,
+    constraint review_history_ibfk_2
+        foreign key (word_id) references words (id)
+            on delete cascade
+);
+
+create index idx_user_history
+    on review_history (user_id asc, reviewed_at desc);
+
+create index idx_word_history
+    on review_history (word_id asc, reviewed_at desc);
+-- auto-generated definition
+create table daily_review_queue
+(
+    id              bigint auto_increment
+        primary key,
+    user_id         int                                                                    not null,
+    review_date     date                                                                   not null,
+    word_ids        json                                                                   null,
+    total_words     int                                          default 0                 null,
+    new_words       int                                          default 0                 null,
+    review_words    int                                          default 0                 null,
+    status          enum ('pending', 'in_progress', 'completed') default 'pending'         null,
+    completed_words int                                          default 0                 null,
+    created_at      timestamp                                    default CURRENT_TIMESTAMP null,
+    updated_at      timestamp                                    default CURRENT_TIMESTAMP null on update CURRENT_TIMESTAMP,
+    constraint unique_user_date
+        unique (user_id, review_date),
+    constraint daily_review_queue_ibfk_1
+        foreign key (user_id) references users (id)
+            on delete cascade
+);
+
+create index idx_review_date
+    on daily_review_queue (review_date, status);
+
+create index idx_user_queue
+    on daily_review_queue (user_id asc, review_date desc);
+
+-- auto-generated definition
+create table user_words
+(
+    id               int auto_increment
+        primary key,
+    user_id          int                                                                                     not null,
+    word_id          int                                                                                     not null,
+    word_meaning_id  int                                                                                     not null,
+    status           enum ('new', 'learning', 'familiar', 'mastered', 'forgotten') default 'new'             null,
+    added_at         timestamp                                                     default CURRENT_TIMESTAMP null,
+    last_reviewed_at timestamp                                                                               null,
+    next_review_at   timestamp                                                                               null,
+    total_reviews    int                                                           default 0                 null,
+    correct_count    int                                                           default 0                 null,
+    current_streak   int                                                           default 0                 null,
+    ease_factor      decimal(4, 2)                                                 default 2.50              null,
+    interval_days    int                                                           default 1                 null,
+    personal_note    text                                                                                    null,
+    is_favorite      tinyint(1)                                                    default 0                 null,
+    updated_at       timestamp                                                     default CURRENT_TIMESTAMP null on update CURRENT_TIMESTAMP,
+    constraint unique_user_word_meaning
+        unique (user_id, word_id, word_meaning_id),
+    constraint user_words_ibfk_1
+        foreign key (user_id) references users (id)
+            on delete cascade,
+    constraint user_words_ibfk_2
+        foreign key (word_id) references words (id)
+            on delete cascade,
+    constraint user_words_ibfk_3
+        foreign key (word_meaning_id) references word_meanings (id)
+            on delete cascade
+);
+
+create index idx_next_review_global
+    on user_words (next_review_at);
+
+create index idx_user_next_review
+    on user_words (user_id, next_review_at, status);
+
+create index idx_user_status
+    on user_words (user_id, status);
+
+create index idx_user_word_meaning
+    on user_words (user_id, word_meaning_id, status);
+
+create index idx_word_meaning
+    on user_words (word_meaning_id);
+
+create index word_id
+    on user_words (word_id);

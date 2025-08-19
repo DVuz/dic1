@@ -1,0 +1,595 @@
+import { NextRequest, NextResponse } from 'next/server';
+import * as cheerio from 'cheerio';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+interface CambridgeWord {
+  word: string;
+  meanings: Array<{
+    id?: number; // Thêm id của WordMeaning
+    audio: {
+      us: string;
+      uk: string;
+    };
+    ipa: {
+      us: string;
+      uk: string;
+    };
+    partOfSpeech: string;
+    definition: string;
+    cefr_level: string;
+    examples: string[];
+  }>;
+  translation: string;
+}
+
+interface ApiResponse extends CambridgeWord {
+  source: 'database' | 'crawl';
+  wordId?: number; // Thêm id của Word
+}
+
+// Function để clean và validate data
+function cleanDefinition(definition: string): string {
+  return definition
+    .replace(/→\s*/g, '') // Remove arrow symbols
+    .replace(/\n/g, ' ') // Replace newlines with spaces
+    .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+    .replace(/^\s*[\-\•\→\►]\s*/g, '') // Remove leading bullet points/arrows
+    .replace(/^\s*\d+\.\s*/g, '') // Remove leading numbers like "1. "
+    .replace(/\s*\|\s*/g, ' ') // Replace pipes with spaces
+    .trim();
+}
+
+function isValidDefinition(definition: string): boolean {
+  const cleaned = cleanDefinition(definition);
+
+  // Check minimum length
+  if (cleaned.length < 10) return false;
+
+  // Check if it's just whitespace, numbers, or symbols
+  if (!/[a-zA-Z]/.test(cleaned)) return false;
+
+  // Check for common invalid patterns
+  const invalidPatterns = [
+    /^memory address$/i,
+    /^→\s*$/,
+    /^\s*\n\s*$/,
+    /^[\s\n\r\t]*$/,
+    /^[\d\s\-\•\→\►]*$/,
+    /^see also/i,
+    /^compare/i,
+    /^opposite/i,
+    /^related/i,
+    /^idioms?:/i,
+    /^phrasal verbs?:/i,
+  ];
+
+  return !invalidPatterns.some(pattern => pattern.test(cleaned));
+}
+
+function cleanPartOfSpeech(pos: string): string {
+  return pos
+    .replace(/[^\w\s]/g, '') // Remove special characters
+    .trim()
+    .toLowerCase();
+}
+
+function cleanExample(example: string): string {
+  return example
+    .replace(/^\s*[\-\•\→\►]\s*/g, '') // Remove leading bullets
+    .replace(/\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isValidExample(example: string): boolean {
+  const cleaned = cleanExample(example);
+  return cleaned.length >= 5 && /[a-zA-Z]/.test(cleaned);
+}
+
+// Function để lấy từ database
+async function getWordFromDatabase(
+  word: string
+): Promise<(CambridgeWord & { wordId: number }) | null> {
+  try {
+    const wordData = await prisma.word.findUnique({
+      where: { word: word.toLowerCase() },
+      include: {
+        meanings: true,
+      },
+    });
+
+    if (!wordData || wordData.meanings.length === 0) {
+      return null;
+    }
+
+    // Convert database format to API format với id
+    const meanings = wordData.meanings.map(meaning => ({
+      id: meaning.id, // Include WordMeaning ID
+      audio: {
+        us: meaning.usAudioUrl || '',
+        uk: meaning.ukAudioUrl || '',
+      },
+      ipa: {
+        us: meaning.usIpa || '',
+        uk: meaning.ukIpa || '',
+      },
+      partOfSpeech: meaning.partOfSpeech || '',
+      definition: meaning.definition,
+      vnDefinition: meaning.vnDefinition || '', // Include Vietnamese definition
+      cefr_level: meaning.cefrLevel || '',
+      examples: Array.isArray(meaning.examples) ? (meaning.examples as string[]) : [],
+    }));
+
+    // Get translation from first meaning's vnDefinition
+    const translation = wordData.meanings[0]?.vnDefinition || '';
+
+    return {
+      word: wordData.word,
+      meanings,
+      translation,
+      wordId: wordData.id, // Include Word ID
+    };
+  } catch (error) {
+    console.error('Database query error:', error);
+    return null;
+  }
+}
+
+// Function để lưu từ vào database với data cleaning
+async function saveWordToDatabase(
+  wordData: CambridgeWord
+): Promise<(CambridgeWord & { wordId: number }) | null> {
+  try {
+    // Filter out invalid meanings before saving
+    const validMeanings = wordData.meanings.filter(meaning =>
+      isValidDefinition(meaning.definition)
+    );
+
+    if (validMeanings.length === 0) {
+      console.log(`⚠️ No valid meanings found for word "${wordData.word}", skipping save`);
+      return null;
+    }
+
+    // Tạo word entry
+    const word = await prisma.word.create({
+      data: {
+        word: wordData.word.toLowerCase(),
+      },
+    });
+
+    // Tạo meanings với cleaned data (không điền vnDefinition)
+    const createdMeanings = await Promise.all(
+      validMeanings.map(meaning =>
+        prisma.wordMeaning.create({
+          data: {
+            wordId: word.id,
+            definition: cleanDefinition(meaning.definition),
+            vnDefinition: '', // Để trống, sẽ điền sau
+            partOfSpeech: cleanPartOfSpeech(meaning.partOfSpeech),
+            examples: meaning.examples.filter(isValidExample).map(cleanExample),
+            cefrLevel: meaning.cefr_level.trim(),
+            ukIpa: meaning.ipa.uk,
+            usIpa: meaning.ipa.us,
+            ukAudioUrl: meaning.audio.uk,
+            usAudioUrl: meaning.audio.us,
+          },
+        })
+      )
+    );
+
+    console.log(
+      `✅ Saved word "${wordData.word}" to database with ${createdMeanings.length} valid meanings`
+    );
+
+    // Return data với IDs được tạo
+    const meaningsWithIds = createdMeanings.map((createdMeaning, index) => ({
+      id: createdMeaning.id, // WordMeaning ID
+      audio: validMeanings[index].audio,
+      ipa: validMeanings[index].ipa,
+      partOfSpeech: validMeanings[index].partOfSpeech,
+      definition: validMeanings[index].definition,
+      cefr_level: validMeanings[index].cefr_level,
+      examples: validMeanings[index].examples,
+    }));
+
+    return {
+      word: wordData.word,
+      meanings: meaningsWithIds,
+      translation: wordData.translation,
+      wordId: word.id, // Word ID
+    };
+  } catch (error) {
+    console.error('Database save error:', error);
+    return null;
+  }
+}
+
+// Helper function để normalize definition cho việc so sánh
+function normalizeDefinition(def: string): string {
+  return cleanDefinition(def)
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Helper function để check định nghĩa có trùng lặp không
+function isDefinitionSimilar(def1: string, def2: string): boolean {
+  const norm1 = normalizeDefinition(def1);
+  const norm2 = normalizeDefinition(def2);
+
+  // Nếu giống hệt nhau
+  if (norm1 === norm2) return true;
+
+  // Nếu một cái chứa cái kia (và độ dài chênh lệch không quá 30%)
+  const longer = norm1.length > norm2.length ? norm1 : norm2;
+  const shorter = norm1.length > norm2.length ? norm2 : norm1;
+
+  if (longer.includes(shorter) && shorter.length / longer.length > 0.7) {
+    return true;
+  }
+
+  // Check similarity bằng từ khóa chung
+  const words1 = norm1.split(' ').filter(w => w.length > 3);
+  const words2 = norm2.split(' ').filter(w => w.length > 3);
+
+  if (words1.length > 3 && words2.length > 3) {
+    const commonWords = words1.filter(w => words2.includes(w));
+    const similarity = commonWords.length / Math.min(words1.length, words2.length);
+    if (similarity > 0.6) return true;
+  }
+
+  return false;
+}
+
+export async function crawlCambridgeWord(word: string): Promise<CambridgeWord | null> {
+  try {
+    const url = `https://dictionary.cambridge.org/dictionary/english/${encodeURIComponent(
+      word.trim()
+    )}`;
+
+    console.log(`🔍 Crawling Cambridge: ${url}`);
+
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache',
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error: ${response.status}`);
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    // Check if word exists
+    const hasContent =
+      $('.pr.dictionary, .entry-body, .di-title, .entry, .pr.entry-body__el').length > 0;
+    if (!hasContent) {
+      console.log(`❌ Word "${word}" not found in Cambridge`);
+      return null;
+    }
+
+    const meanings: Array<{
+      audio: { us: string; uk: string };
+      ipa: { us: string; uk: string };
+      partOfSpeech: string;
+      definition: string;
+      cefr_level: string;
+      examples: string[];
+    }> = [];
+
+    // Set để track definitions đã thêm (tránh trùng lặp)
+    const addedDefinitions = new Set<string>();
+
+    // Crawl theo cấu trúc từ trên xuống - Group theo main sessions
+    console.log('📚 Extracting from main entries in top-down order...');
+
+    $('.pr.entry-body__el')
+      .slice(0, 4)
+      .each((entryIndex: number, entry: any) => {
+        const $entry = $(entry);
+
+        // Extract pronunciation và part of speech cho SESSION này
+        const ukIpa = $entry.find('.uk .pron .ipa, .uk.dpron .ipa').first().text().trim();
+        const usIpa = $entry.find('.us .pron .ipa, .us.dpron .ipa').first().text().trim();
+
+        // Extract audio cho SESSION này
+        const ukAudioSrc = $entry
+          .find('.uk .daud audio source[type="audio/mpeg"], .uk.dpron audio source')
+          .first()
+          .attr('src');
+        const usAudioSrc = $entry
+          .find('.us .daud audio source[type="audio/mpeg"], .us.dpron audio source')
+          .first()
+          .attr('src');
+
+        const ukAudio = ukAudioSrc
+          ? ukAudioSrc.startsWith('http')
+            ? ukAudioSrc
+            : `https://dictionary.cambridge.org${ukAudioSrc}`
+          : '';
+        const usAudio = usAudioSrc
+          ? usAudioSrc.startsWith('http')
+            ? usAudioSrc
+            : `https://dictionary.cambridge.org${usAudioSrc}`
+          : '';
+
+        // Part of speech và CEFR cho SESSION này - SẼ DÙNG CHO TẤT CẢ MEANINGS TRONG SESSION
+        const rawPartOfSpeech = $entry.find('.pos, .dpos, .posgram .pos').first().text().trim();
+        const sessionPartOfSpeech = cleanPartOfSpeech(rawPartOfSpeech);
+        const sessionCefrLevel = $entry
+          .find('.epp-xref, .def-info .epp-xref, .ddef-info .epp-xref')
+          .first()
+          .text()
+          .trim();
+
+        console.log(
+          `📝 Session ${entryIndex + 1}: ${sessionPartOfSpeech} - IPA: ${ukIpa}/${usIpa}`
+        );
+
+        // Extract TẤT CẢ definitions trong session này theo thứ tự từ trên xuống
+        $entry.find('.sense-body').each((senseIndex: number, senseBody: any) => {
+          if (meanings.length >= 15) return false; // Dừng khi đạt giới hạn
+
+          const $senseBody = $(senseBody);
+
+          // Lấy TẤT CẢ definitions trong sense-body này
+          $senseBody.find('.def, .ddef_d').each((defIndex: number, defElement: any) => {
+            if (meanings.length >= 15) return false;
+
+            const rawDefinition = $(defElement).text().trim();
+
+            if (rawDefinition && isValidDefinition(rawDefinition)) {
+              const cleanedDefinition = cleanDefinition(rawDefinition);
+
+              // Check duplicate
+              let isDuplicate = false;
+              for (const existingDef of addedDefinitions) {
+                if (isDefinitionSimilar(cleanedDefinition, existingDef)) {
+                  isDuplicate = true;
+                  break;
+                }
+              }
+
+              if (!isDuplicate) {
+                addedDefinitions.add(cleanedDefinition);
+
+                // Get examples cho definition này
+                const examples: string[] = [];
+                const $defParent = $(defElement).closest('.sense-body, .def-block, .ddef_block');
+
+                $defParent
+                  .find('.examp .eg, .dexamp .deg, .eg, .deg')
+                  .slice(0, 3)
+                  .each((exIndex: number, example: any) => {
+                    const rawExample = $(example).text().trim();
+                    if (isValidExample(rawExample)) {
+                      const cleanedExample = cleanExample(rawExample);
+                      if (!examples.includes(cleanedExample)) {
+                        examples.push(cleanedExample);
+                      }
+                    }
+                  });
+
+                // SỬ DỤNG PRONUNCIATION VÀ PART OF SPEECH CỦA SESSION CHO TẤT CẢ MEANINGS
+                meanings.push({
+                  audio: { us: usAudio, uk: ukAudio },
+                  ipa: { us: usIpa, uk: ukIpa },
+                  partOfSpeech: sessionPartOfSpeech, // Dùng chung cho session
+                  definition: cleanedDefinition,
+                  cefr_level: sessionCefrLevel,
+                  examples,
+                });
+
+                console.log(
+                  `  ✓ Added meaning ${meanings.length}: ${cleanedDefinition.substring(0, 50)}...`
+                );
+              }
+            }
+          });
+        });
+      });
+
+    // Nếu chưa đủ 15 meanings, extract thêm từ các selector khác
+    if (meanings.length < 10) {
+      console.log(`📖 Found ${meanings.length} meanings, extracting more...`);
+
+      // Fallback global pronunciation
+      const fallbackUkIpa = $('.uk .pron .ipa, .ipa').first().text().trim();
+      const fallbackUsIpa = $('.us .pron .ipa, .ipa').first().text().trim() || fallbackUkIpa;
+      const fallbackUkAudio =
+        $('.uk .daud audio source[type="audio/mpeg"]').first().attr('src') || '';
+      const fallbackUsAudio =
+        $('.us .daud audio source[type="audio/mpeg"]').first().attr('src') || '';
+
+      $('.def, .ddef_d').each((index: number, defElement: any) => {
+        if (meanings.length >= 15) return false;
+
+        const rawDefinition = $(defElement).text().trim();
+        if (rawDefinition && isValidDefinition(rawDefinition)) {
+          const cleanedDefinition = cleanDefinition(rawDefinition);
+
+          // Check duplicate
+          let isDuplicate = false;
+          for (const existingDef of addedDefinitions) {
+            if (isDefinitionSimilar(cleanedDefinition, existingDef)) {
+              isDuplicate = true;
+              break;
+            }
+          }
+
+          if (!isDuplicate) {
+            addedDefinitions.add(cleanedDefinition);
+
+            const $parent = $(defElement).closest(
+              '.entry, .pr.entry-body__el, .def-block, .ddef_block'
+            );
+            const rawPartOfSpeech = $parent.find('.pos, .dpos').first().text().trim();
+            const partOfSpeech = cleanPartOfSpeech(rawPartOfSpeech);
+            const cefrLevel = $parent.find('.epp-xref').first().text().trim();
+
+            const examples: string[] = [];
+            $parent
+              .find('.eg, .deg')
+              .slice(0, 2)
+              .each((i: number, ex: any) => {
+                const rawExample = $(ex).text().trim();
+                if (isValidExample(rawExample)) {
+                  const cleanedExample = cleanExample(rawExample);
+                  if (examples.length < 2) {
+                    examples.push(cleanedExample);
+                  }
+                }
+              });
+
+            meanings.push({
+              audio: {
+                us: fallbackUsAudio.startsWith('http')
+                  ? fallbackUsAudio
+                  : `https://dictionary.cambridge.org${fallbackUsAudio}`,
+                uk: fallbackUkAudio.startsWith('http')
+                  ? fallbackUkAudio
+                  : `https://dictionary.cambridge.org${fallbackUkAudio}`,
+              },
+              ipa: {
+                us: fallbackUsIpa,
+                uk: fallbackUkIpa,
+              },
+              partOfSpeech,
+              definition: cleanedDefinition,
+              cefr_level: cefrLevel,
+              examples,
+            });
+          }
+        }
+      });
+    }
+
+    // Filter out any remaining invalid meanings
+    const validMeanings = meanings.filter(meaning => isValidDefinition(meaning.definition));
+
+    if (validMeanings.length === 0) {
+      console.log(`❌ No valid meanings found for word "${word}"`);
+      return null;
+    }
+
+    // Giới hạn cuối cùng tối đa 15 meanings
+    const finalMeanings = validMeanings.slice(0, 15);
+
+    const result: CambridgeWord = {
+      word,
+      meanings: finalMeanings,
+      translation: '', // Không tự động dịch
+    };
+
+    console.log(
+      `✅ Successfully crawled "${word}" - Found ${finalMeanings.length} valid meanings grouped by sessions`
+    );
+    return result;
+  } catch (error) {
+    console.error(`❌ Error crawling "${word}":`, error);
+    return null;
+  }
+}
+
+// Main function để xử lý word lookup
+async function processWordLookup(
+  word: string
+): Promise<{ data: CambridgeWord & { wordId: number }; source: 'database' | 'crawl' } | null> {
+  const trimmedWord = word.trim().toLowerCase();
+
+  // 1. Kiểm tra trong database trước
+  console.log(`🔍 Checking database for word: "${trimmedWord}"`);
+  const dbResult = await getWordFromDatabase(trimmedWord);
+
+  if (dbResult) {
+    console.log(`✅ Found word "${trimmedWord}" in database`);
+    return { data: dbResult, source: 'database' };
+  }
+
+  // 2. Nếu không có trong database, crawl từ Cambridge
+  console.log(`📡 Word "${trimmedWord}" not in database, crawling from Cambridge...`);
+  const crawlResult = await crawlCambridgeWord(trimmedWord);
+
+  if (!crawlResult) {
+    return null;
+  }
+
+  // 3. Lưu vào database và lấy IDs
+  const savedResult = await saveWordToDatabase(crawlResult);
+
+  if (!savedResult) {
+    return null;
+  }
+
+  return { data: savedResult, source: 'crawl' };
+}
+
+// API Route handlers
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const word = searchParams.get('word');
+
+    if (!word || word.trim().length === 0) {
+      return NextResponse.json({ error: 'Word parameter is required' }, { status: 400 });
+    }
+
+    const result = await processWordLookup(word);
+
+    if (!result) {
+      return NextResponse.json({ error: `Word "${word}" not found` }, { status: 404 });
+    }
+
+    const response: ApiResponse = {
+      ...result.data,
+      source: result.source,
+    };
+
+    return NextResponse.json(response);
+  } catch (error) {
+    console.error('API Error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const { word } = await request.json();
+
+    if (!word || word.trim().length === 0) {
+      return NextResponse.json({ error: 'Word is required' }, { status: 400 });
+    }
+
+    const result = await processWordLookup(word);
+
+    if (!result) {
+      return NextResponse.json({ error: `Word "${word}" not found` }, { status: 404 });
+    }
+
+    const response: ApiResponse = {
+      ...result.data,
+      source: result.source,
+    };
+
+    return NextResponse.json(response);
+  } catch (error) {
+    console.error('API Error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  } finally {
+    await prisma.$disconnect();
+  }
+}

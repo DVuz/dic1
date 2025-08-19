@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Vocab Lookup Extension",
+  "version": "1.0",
+  "description": "Lookup words and add to vocabulary by double-clicking",
+  "permissions": ["cookies", "activeTab", "tabs"],
+  "host_permissions": ["http://localhost:3000/*", "https://dictionary.cambridge.org/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; media-src 'self' https://dictionary.cambridge.org https://*.rackcdn.com data: blob:;"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Vocab Lookup Extension</title>
+  <style>
+    body {
+      width: 300px;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      margin: 0;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .header h2 {
+      margin: 0 0 8px 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .header p {
+      margin: 0;
+      font-size: 14px;
+      opacity: 0.9;
+    }
+    .instructions {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .instructions h3 {
+      margin: 0 0 12px 0;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .instructions ul {
+      margin: 0;
+      padding-left: 16px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .instructions li {
+      margin-bottom: 8px;
+    }
+    .status {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+      font-size: 13px;
+    }
+    .status.loading {
+      background: rgba(251, 191, 36, 0.2);
+    }
+    .status.success {
+      background: rgba(16, 185, 129, 0.2);
+    }
+    .status.error {
+      background: rgba(239, 68, 68, 0.2);
+    }
+    .login-btn {
+      background: rgba(255, 255, 255, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      color: white;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      margin-top: 8px;
+      transition: all 0.2s;
+    }
+    .login-btn:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>🔍 Vocab Lookup</h2>
+    <p>Tra từ và thêm vào từ vựng</p>
+  </div>
+
+  <div class="instructions">
+    <h3>📖 Hướng dẫn sử dụng:</h3>
+    <ul>
+      <li><strong>Double-click</strong> vào từ bất kỳ để tra nghĩa</li>
+      <li>Extension sẽ tự động kiểm tra đăng nhập</li>
+      <li>Nếu chưa đăng nhập sẽ mở tab đăng nhập</li>
+      <li>Sau khi đăng nhập, có thể thêm từ vào danh sách học</li>
+    </ul>
+  </div>
+
+  <div id="status" class="status loading">
+    Đang kiểm tra trạng thái đăng nhập...
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
